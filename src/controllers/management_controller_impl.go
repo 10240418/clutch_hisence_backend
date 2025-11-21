@@ -233,8 +233,6 @@ func (mc *ManagementController) DeleteProductionPlan() {
 	mc.ctx.JSON(200, gin.H{"message": "success"})
 }
 
-
-
 func (mc *ManagementController) GetProductionPlans() {
 	var queryParams struct{}
 	var paginateParams models.PaginationQuery
@@ -420,6 +418,7 @@ func (mc *ManagementController) GetProducts() {
 		StartTime     string `form:"startTime"`     // 开始时间 YYYY-MM-DD HH:MM:SS
 		EndTime       string `form:"endTime"`       // 结束时间 YYYY-MM-DD HH:MM:SS
 		Search        string `form:"search"`        // 综合模糊查询（托盘SN、产品SN、产品型号SAP）
+		Description   string `form:"description"`   // 产品型号描述模糊查询
 		ProductLineID uint   `form:"productLineId"` // 产线ID
 		PalletID      uint   `form:"palletId"`      // 托盘ID
 		HasDefect     bool   `form:"hasDefect"`     // 是否有缺陷
@@ -452,13 +451,34 @@ func (mc *ManagementController) GetProducts() {
 	}
 
 	// 综合模糊查询（托盘SN、产品SN、产品型号SAP）
+	needsProductModelJoin := queryParams.Search != "" || queryParams.Description != ""
+	needsPalletJoin := queryParams.Search != ""
+
+	if needsProductModelJoin || needsPalletJoin {
+		sqlHandlers = append(sqlHandlers, func(db *gorm.DB) *gorm.DB {
+			if needsProductModelJoin {
+				db = db.Joins("LEFT JOIN product_models ON products.product_model_id = product_models.id")
+			}
+			if needsPalletJoin {
+				db = db.Joins("LEFT JOIN pallets ON products.pallet_id = pallets.id")
+			}
+			return db
+		})
+	}
+
 	if queryParams.Search != "" {
 		sqlHandlers = append(sqlHandlers, func(db *gorm.DB) *gorm.DB {
 			searchPattern := "%" + queryParams.Search + "%"
-			return db.Joins("LEFT JOIN pallets ON products.pallet_id = pallets.id").
-				Joins("LEFT JOIN product_models ON products.product_model_id = product_models.id").
-				Where("products.sn LIKE ? OR pallets.sn LIKE ? OR product_models.sap LIKE ?",
-					searchPattern, searchPattern, searchPattern)
+			return db.Where("products.sn LIKE ? OR pallets.sn LIKE ? OR product_models.sap LIKE ?",
+				searchPattern, searchPattern, searchPattern)
+		})
+	}
+
+	// 产品型号描述模糊查询
+	if queryParams.Description != "" {
+		sqlHandlers = append(sqlHandlers, func(db *gorm.DB) *gorm.DB {
+			descPattern := "%" + queryParams.Description + "%"
+			return db.Where("product_models.description LIKE ?", descPattern)
 		})
 	}
 
