@@ -44,8 +44,10 @@ type IProductModelService interface {
 
 type IProductionPlanService interface {
 	CreateProductionPlan(productionPlan *models.ProductionPlan) error
+	BatchCreateProductionPlans(plans []models.ProductionPlan) ([]models.ProductionPlan, error)
 	GetProductionPlan(id int64) (*models.ProductionPlan, error)
 	GetProductionPlans(query map[string]interface{}, paginate map[string]interface{}, sqlHandler ...func(*gorm.DB) *gorm.DB) ([]models.ProductionPlan, models.PaginationResult, error)
+	GetProductionPlansByDate(date time.Time) ([]models.ProductionPlan, error)
 	UpdateProductionPlan(productionPlanInstance *models.ProductionPlan, productionPlan map[string]interface{}) error
 	DeleteProductionPlans(ids []int64) error
 	GetProductionPlansByDateRange(baseDate time.Time) (map[string][]models.ProductionPlan, error)

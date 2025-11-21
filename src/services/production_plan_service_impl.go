@@ -24,6 +24,16 @@ func (s *ProductionPlanService) CreateProductionPlan(productionPlan *models.Prod
 	return s.db.Create(productionPlan).Error
 }
 
+func (s *ProductionPlanService) BatchCreateProductionPlans(plans []models.ProductionPlan) ([]models.ProductionPlan, error) {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		return tx.Create(&plans).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return plans, nil
+}
+
 func (s *ProductionPlanService) GetProductionPlan(id int64) (*models.ProductionPlan, error) {
 	var productionPlan models.ProductionPlan
 	err := s.db.First(&productionPlan, id).Error
@@ -41,7 +51,7 @@ func (s *ProductionPlanService) GetProductionPlans(query map[string]interface{},
 	model = model.Where(query)
 
 	model, pagination = utils.DoPagination(model, paginate)
-	
+
 	// Order by ID to maintain import order
 	model = model.Order("id ASC")
 
@@ -114,12 +124,110 @@ func (s *ProductionPlanService) GetProductionPlansByDateRange(baseDate time.Time
 */
 
 func (s *ProductionPlanService) GetProductionPlansByDateRange(baseDate time.Time) (map[string][]models.ProductionPlan, error) {
-    // Temporary stub
-    return nil, nil
+	// Temporary stub
+	return nil, nil
+}
+
+func (s *ProductionPlanService) GetProductionPlansByDate(date time.Time) ([]models.ProductionPlan, error) {
+	// 1. 查询指定日期的所有生产计划
+	var plans []models.ProductionPlan
+	dateStr := date.Format("2006-01-02")
+	err := s.db.Where("DATE(plan_date) = ?", dateStr).Find(&plans).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果没有生产计划，直接返回
+	if len(plans) == 0 {
+		return plans, nil
+	}
+
+	// 2. 收集所有 part_number 用于 SQL IN 查询
+	partNumbers := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		partNumbers = append(partNumbers, plan.PartNumber)
+	}
+
+	// 3. 使用 SUBSTRING_INDEX 提取 description 中第一个 "/" 之前的部分，然后分组统计
+	type CountResult struct {
+		PartNumberPrefix string
+		Count            int
+	}
+
+	var countResults []CountResult
+	err = s.db.Table("products").
+		Select("SUBSTRING_INDEX(product_models.description, '/', 1) as part_number_prefix, COUNT(*) as count").
+		Joins("INNER JOIN product_models ON products.product_model_id = product_models.id").
+		Where("DATE(products.created_at) = ?", dateStr).
+		Where("SUBSTRING_INDEX(product_models.description, '/', 1) IN ?", partNumbers).
+		Group("part_number_prefix").
+		Scan(&countResults).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. 将统计结果转换为 map，便于快速查找
+	planCounts := make(map[string]int)
+	for _, result := range countResults {
+		planCounts[result.PartNumberPrefix] = result.Count
+	}
+
+	// 5. 对每个生产计划应用智能分配算法
+	for i := range plans {
+		totalMatched := 0
+		if count, exists := planCounts[plans[i].PartNumber]; exists {
+			totalMatched = count
+		}
+
+		// 智能分配算法：按照 T -> T1 -> T2 -> T3 的顺序填充实际完成数量
+		remainingCount := totalMatched
+
+		// T 阶段
+		plans[i].TActual = min(plans[i].TPlanned, remainingCount)
+		plans[i].TUnfinished = plans[i].TPlanned - plans[i].TActual
+		remainingCount -= plans[i].TActual
+
+		// T1 阶段
+		plans[i].T1Actual = min(plans[i].T1Planned, remainingCount)
+		plans[i].T1Unfinished = plans[i].T1Planned - plans[i].T1Actual
+		remainingCount -= plans[i].T1Actual
+
+		// T2 阶段
+		plans[i].T2Actual = min(plans[i].T2Planned, remainingCount)
+		plans[i].T2Unfinished = plans[i].T2Planned - plans[i].T2Actual
+		remainingCount -= plans[i].T2Actual
+
+		// T3 阶段
+		plans[i].T3Actual = min(plans[i].T3Planned, remainingCount)
+		plans[i].T3Unfinished = plans[i].T3Planned - plans[i].T3Actual
+		remainingCount -= plans[i].T3Actual
+
+		// 计算总计字段
+		plans[i].TotalInspected = plans[i].TActual + plans[i].T1Actual + plans[i].T2Actual + plans[i].T3Actual
+		plans[i].TotalUnfinished = plans[i].TUnfinished + plans[i].T1Unfinished + plans[i].T2Unfinished + plans[i].T3Unfinished
+
+		// 计算达成率（避免除以0）
+		if plans[i].TotalPlanned > 0 {
+			plans[i].AchievementRate = float64(plans[i].TotalInspected) / float64(plans[i].TotalPlanned) * 100.0
+		} else {
+			plans[i].AchievementRate = 0.0
+		}
+	}
+
+	return plans, nil
+}
+
+// min helper function
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s *ProductionPlanService) GetActiveProductionPlan(date time.Time, productModelID *uint, allowExceed bool) (*models.ProductionPlan, error) {
-	// This method might need adjustment or removal based on new requirements, 
+	// This method might need adjustment or removal based on new requirements,
 	// but keeping it for now as it might be used elsewhere.
 	// Since the model changed, this implementation is likely broken and needs to be updated if used.
 	return nil, nil
@@ -143,51 +251,45 @@ func (s *ProductionPlanService) ImportProductionPlan(file multipart.File) ([]mod
 	fmt.Printf("Total rows read: %d\n", len(rows))
 
 	var plans []models.ProductionPlan
-	// For testing: use fixed date instead of today
-	targetDate := "2025-08-21"
-	fmt.Printf("Target date for filtering: %s\n", targetDate)
+	var targetDate time.Time
+	dateSet := false
+
+	// Helper to parse int safely
+	parseInt := func(s string) int {
+		val, _ := strconv.Atoi(s)
+		return val
+	}
 
 	// Skip header row
 	for i, row := range rows {
 		if i == 0 {
-			fmt.Printf("Header row: %v\n", row)
 			continue
 		}
-		if len(row) < 6 { // Ensure enough columns for basic data
-			fmt.Printf("Row %d skipped: not enough columns (%d)\n", i, len(row))
+		if len(row) < 6 {
 			continue
 		}
 
-		// Log first few columns for debugging
-		fmt.Printf("Row %d: MaterialCode='%s', PartNumber='%s', Type='%s', Manufacturer='%s', PlanDate='%s'\n", 
-			i, row[0], row[1], row[2], row[3], row[4])
-
-		// Check if the plan date is today
-		// New order:
-		// [0] MaterialCode, [1] PartNumber, [2] Type, [3] Manufacturer, [4] PlanDate, [5] ProductionLine...
+		// Parse date
 		planDateStr := row[4]
-		
-		// Try multiple date formats
 		var planDate time.Time
 		var err error
-		
-		// First try standard format: YYYY-MM-DD
+
 		planDate, err = time.Parse("2006-01-02", planDateStr)
 		if err != nil {
-			// Try YY-MM-DD format (e.g., 25-03-04 for 2025-03-04)
 			planDate, err = time.Parse("06-01-02", planDateStr)
 			if err != nil {
-				fmt.Printf("Row %d skipped: invalid date format '%s' (%v)\n", i, planDateStr, err)
 				continue
 			}
 		}
 
-		if planDate.Format("2006-01-02") != targetDate {
-			fmt.Printf("Row %d skipped: date '%s' is not target date (%s)\n", i, planDate.Format("2006-01-02"), targetDate)
-			continue
+		// Validate all dates are the same
+		if !dateSet {
+			targetDate = planDate
+			dateSet = true
+		} else if !planDate.Equal(targetDate) {
+			return nil, fmt.Errorf("所有记录的计划日期必须相同，发现: %s 和 %s",
+				targetDate.Format("2006-01-02"), planDate.Format("2006-01-02"))
 		}
-
-		fmt.Printf("Row %d: MATCHED! Will be imported.\n", i)
 
 		plan := models.ProductionPlan{
 			MaterialCode:   row[0],
@@ -196,12 +298,6 @@ func (s *ProductionPlanService) ImportProductionPlan(file multipart.File) ([]mod
 			Manufacturer:   row[3],
 			PlanDate:       planDate,
 			ProductionLine: row[5],
-		}
-
-		// Helper to parse int safely
-		parseInt := func(s string) int {
-			val, _ := strconv.Atoi(s)
-			return val
 		}
 
 		// T
@@ -244,7 +340,7 @@ func (s *ProductionPlanService) ImportProductionPlan(file multipart.File) ([]mod
 		plan.TotalPlanned = plan.TPlanned + plan.T1Planned + plan.T2Planned + plan.T3Planned
 		plan.TotalInspected = plan.TActual + plan.T1Actual + plan.T2Actual + plan.T3Actual
 		plan.TotalUnfinished = plan.TUnfinished + plan.T1Unfinished + plan.T2Unfinished + plan.T3Unfinished
-		
+
 		// 计算达成率（避免除以0）
 		if plan.TotalPlanned > 0 {
 			plan.AchievementRate = float64(plan.TotalInspected) / float64(plan.TotalPlanned) * 100
@@ -262,28 +358,17 @@ func (s *ProductionPlanService) ImportProductionPlan(file multipart.File) ([]mod
 
 	fmt.Printf("Total plans to save: %d\n", len(plans))
 
+	if len(plans) == 0 {
+		return nil, fmt.Errorf("文件中没有找到有效的数据")
+	}
+
 	// Transaction to save
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		// Delete old plans for target date to avoid duplicates
-		deleteResult := tx.Where("plan_date = ?", targetDate).Delete(&models.ProductionPlan{})
-		if deleteResult.Error != nil {
-			fmt.Printf("Error deleting old plans: %v\n", deleteResult.Error)
-			return deleteResult.Error
-		}
-		fmt.Printf("Deleted %d old records for date %s\n", deleteResult.RowsAffected, targetDate)
-		
-		if len(plans) > 0 {
-			if err := tx.Create(&plans).Error; err != nil {
-				fmt.Printf("Error saving plans: %v\n", err)
-				return err
-			}
-			fmt.Printf("Successfully saved %d new records\n", len(plans))
-		}
-		return nil
+		return tx.Create(&plans).Error
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("保存失败: %v", err)
 	}
 
 	return plans, nil

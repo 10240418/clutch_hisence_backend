@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/clutchtechnology/hisense-vmi-dataserver/src/models"
@@ -828,24 +829,141 @@ func (mc *ManagementController) GetCostReport() {
 }
 
 func (mc *ManagementController) ImportProductionPlan() {
-	file, err := mc.ctx.FormFile("file")
-	if err != nil {
-		mc.ctx.JSON(400, gin.H{"error": "file is required"})
+	// 定义请求结构（使用字符串接收日期）
+	type PlanRequest struct {
+		MaterialCode    string  `json:"materialCode"`
+		PartNumber      string  `json:"partNumber"`
+		Type            string  `json:"type"`
+		Manufacturer    string  `json:"manufacturer"`
+		PlanDate        string  `json:"planDate"` // 字符串格式：YYYY-MM-DD
+		ProductionLine  string  `json:"productionLine"`
+		TPlanned        int     `json:"tPlanned"`
+		TActual         int     `json:"tActual"`
+		TUnfinished     int     `json:"tUnfinished"`
+		T1Planned       int     `json:"t1Planned"`
+		T1Actual        int     `json:"t1Actual"`
+		T1Unfinished    int     `json:"t1Unfinished"`
+		T2Planned       int     `json:"t2Planned"`
+		T2Actual        int     `json:"t2Actual"`
+		T2Unfinished    int     `json:"t2Unfinished"`
+		T3Planned       int     `json:"t3Planned"`
+		T3Actual        int     `json:"t3Actual"`
+		T3Unfinished    int     `json:"t3Unfinished"`
+		TotalPlanned    int     `json:"totalPlanned"`
+		TotalInspected  int     `json:"totalInspected"`
+		TotalUnfinished int     `json:"totalUnfinished"`
+		AchievementRate float64 `json:"achievementRate"`
+		SpecialNote     string  `json:"specialNote"`
+	}
+
+	var req struct {
+		Plans []PlanRequest `json:"plans" binding:"required,min=1"`
+	}
+
+	// 绑定 JSON 数据
+	if err := mc.ctx.ShouldBindJSON(&req); err != nil {
+		mc.ctx.JSON(400, gin.H{"error": "无效的请求数据", "message": err.Error()})
 		return
 	}
 
-	f, err := file.Open()
-	if err != nil {
-		mc.ctx.JSON(500, gin.H{"error": "failed to open file"})
-		return
-	}
-	defer f.Close()
-
-	plans, err := mc.productionPlanService.ImportProductionPlan(f)
-	if err != nil {
-		mc.ctx.JSON(500, gin.H{"error": err.Error()})
+	if len(req.Plans) == 0 {
+		mc.ctx.JSON(400, gin.H{"error": "没有要导入的数据"})
 		return
 	}
 
-	mc.ctx.JSON(200, gin.H{"data": plans, "message": "success"})
+	// 转换为 models.ProductionPlan 并验证日期
+	var plans []models.ProductionPlan
+	var targetDate time.Time
+
+	for i, p := range req.Plans {
+		// 解析日期
+		planDate, err := time.Parse("2006-01-02", p.PlanDate)
+		if err != nil {
+			mc.ctx.JSON(400, gin.H{
+				"error":   "日期格式错误",
+				"message": fmt.Sprintf("记录 %d 的日期 %s 格式不正确，应为 YYYY-MM-DD", i+1, p.PlanDate),
+			})
+			return
+		}
+
+		// 验证所有日期一致
+		if i == 0 {
+			targetDate = planDate
+		} else if !planDate.Equal(targetDate) {
+			mc.ctx.JSON(400, gin.H{
+				"error": "所有记录的计划日期必须相同",
+				"message": fmt.Sprintf("记录 %d 的日期 %s 与第一条记录的日期 %s 不一致",
+					i+1, planDate.Format("2006-01-02"), targetDate.Format("2006-01-02")),
+			})
+			return
+		}
+
+		// 构造 ProductionPlan
+		plan := models.ProductionPlan{
+			MaterialCode:    p.MaterialCode,
+			PartNumber:      p.PartNumber,
+			Type:            p.Type,
+			Manufacturer:    p.Manufacturer,
+			PlanDate:        planDate,
+			ProductionLine:  p.ProductionLine,
+			TPlanned:        p.TPlanned,
+			TActual:         p.TActual,
+			TUnfinished:     p.TUnfinished,
+			T1Planned:       p.T1Planned,
+			T1Actual:        p.T1Actual,
+			T1Unfinished:    p.T1Unfinished,
+			T2Planned:       p.T2Planned,
+			T2Actual:        p.T2Actual,
+			T2Unfinished:    p.T2Unfinished,
+			T3Planned:       p.T3Planned,
+			T3Actual:        p.T3Actual,
+			T3Unfinished:    p.T3Unfinished,
+			TotalPlanned:    p.TotalPlanned,
+			TotalInspected:  p.TotalInspected,
+			TotalUnfinished: p.TotalUnfinished,
+			AchievementRate: p.AchievementRate,
+			SpecialNote:     p.SpecialNote,
+		}
+		plans = append(plans, plan)
+	}
+
+	// 保存到数据库
+	savedPlans, err := mc.productionPlanService.BatchCreateProductionPlans(plans)
+	if err != nil {
+		mc.ctx.JSON(500, gin.H{"error": "保存失败", "message": err.Error()})
+		return
+	}
+
+	mc.ctx.JSON(200, gin.H{
+		"data":    savedPlans,
+		"message": fmt.Sprintf("成功导入 %d 条记录", len(savedPlans)),
+	})
+}
+
+func (mc *ManagementController) GetProductionPlansByDate() {
+	// 获取日期参数
+	dateStr := mc.ctx.Query("date")
+	if dateStr == "" {
+		mc.ctx.JSON(400, gin.H{"error": "缺少日期参数"})
+		return
+	}
+
+	// 解析日期
+	date, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		mc.ctx.JSON(400, gin.H{"error": "日期格式错误，应为 YYYY-MM-DD", "message": err.Error()})
+		return
+	}
+
+	// 调用服务层方法
+	plans, err := mc.productionPlanService.GetProductionPlansByDate(date)
+	if err != nil {
+		mc.ctx.JSON(500, gin.H{"error": "查询失败", "message": err.Error()})
+		return
+	}
+
+	mc.ctx.JSON(200, gin.H{
+		"data":    plans,
+		"message": "success",
+	})
 }

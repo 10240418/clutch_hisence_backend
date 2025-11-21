@@ -37,12 +37,13 @@ func registerManagementRoutes(r *gin.RouterGroup, sc godi.IGoDI) {
 		r.PUT("/product_model", func(c *gin.Context) { controllers.NewManagementController(c, sc).UpdateProductModel() })
 
 		r.POST("/production_plan", func(c *gin.Context) { controllers.NewManagementController(c, sc).AddProductionPlan() })
+		r.POST("/production_plan/import", func(c *gin.Context) { controllers.NewManagementController(c, sc).ImportProductionPlan() })
+		r.GET("/production_plan/date", func(c *gin.Context) { controllers.NewManagementController(c, sc).GetProductionPlansByDate() })
 		r.DELETE("/production_plan", func(c *gin.Context) { controllers.NewManagementController(c, sc).DeleteProductionPlan() })
 		r.GET("/production_plan", func(c *gin.Context) { controllers.NewManagementController(c, sc).GetProductionPlans() })
+		r.GET("/production_plan/date_range", func(c *gin.Context) { controllers.NewManagementController(c, sc).GetProductionPlansByDateRange() })
 		r.GET("/production_plan/:id", func(c *gin.Context) { controllers.NewManagementController(c, sc).GetProductionPlan() })
 		r.PUT("/production_plan", func(c *gin.Context) { controllers.NewManagementController(c, sc).UpdateProductionPlan() })
-		r.GET("/production_plan/date_range", func(c *gin.Context) { controllers.NewManagementController(c, sc).GetProductionPlansByDateRange() })
-		r.POST("/production_plan/import", func(c *gin.Context) { controllers.NewManagementController(c, sc).ImportProductionPlan() })
 
 		r.GET("/product_line", func(c *gin.Context) { controllers.NewManagementController(c, sc).GetProductLines() })
 		r.GET("/product_line/:id", func(c *gin.Context) { controllers.NewManagementController(c, sc).GetProductLine() })
